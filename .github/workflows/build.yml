@@ -1,0 +1,32 @@
+name: Conditional Build
+
+on:
+  push:
+
+jobs:
+  build:
+    if: endsWith(github.event.head_commit.message, '-build')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build
+        run: gradle build
+
+      - name: Upload jars
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitpuller-jars
+          path: build/libs/*.jar
