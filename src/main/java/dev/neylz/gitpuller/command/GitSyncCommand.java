@@ -14,18 +14,21 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.storage.LevelResource;
 import org.eclipse.jgit.api.Git;
+import org.eclipse.jgit.api.PullResult;
 import org.eclipse.jgit.api.ResetCommand;
 import org.eclipse.jgit.api.errors.GitAPIException;
+import org.eclipse.jgit.api.errors.CheckoutConflictException;
 import org.eclipse.jgit.api.errors.RefNotFoundException;
 import org.eclipse.jgit.api.errors.WrongRepositoryStateException;
-import org.eclipse.jgit.api.errors.CheckoutConflictException;
-import org.eclipse.jgit.api.PullResult;
 import org.eclipse.jgit.transport.UsernamePasswordCredentialsProvider;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 
 public class GitSyncCommand {
     private static final int SHORT_SHA_LENGTH = 7;
@@ -47,8 +50,7 @@ public class GitSyncCommand {
 
     private static int syncMonoPack(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
         File repo = ctx.getSource().getServer().getWorldPath(LevelResource.DATAPACK_DIR).toFile();
-        syncRepo(ctx.getSource(), repo, "monorepo");
-        return 1;
+        return syncRepo(ctx.getSource(), repo, "monorepo");
     }
 
     private static int syncPack(CommandContext<CommandSourceStack> ctx, String packName) throws CommandSyntaxException {
@@ -60,11 +62,10 @@ public class GitSyncCommand {
             throw new CommandSyntaxException(null, () -> "Datapack " + packName + " is not a git repository");
         }
 
-        syncRepo(ctx.getSource(), repo, "[" + packName + "]");
-        return 1;
+        return syncRepo(ctx.getSource(), repo, "[" + packName + "]");
     }
 
-    private static void syncRepo(CommandSourceStack source, File repoDir, String label) throws CommandSyntaxException {
+    private static int syncRepo(CommandSourceStack source, File repoDir, String label) throws CommandSyntaxException {
         source.sendSuccess(
             () -> Component.empty()
                 .append(Component.literal("Synchronizing ").withStyle(ChatFormatting.RESET))
@@ -73,6 +74,7 @@ public class GitSyncCommand {
             true
         );
 
+        MinecraftServer server = source.getServer();
         String previousSha = GitUtil.getCurrentHeadSha1(repoDir, 40);
         String newSha;
 
@@ -91,16 +93,16 @@ public class GitSyncCommand {
                 .call();
 
             if (!pullResult.isSuccessful()) {
-                throw new CommandSyntaxException(null, () -> "Pull operation failed on " + label + ". No changes were kept.");
+                throw new CommandSyntaxException(null, () -> "Pull operation failed on " + label + ".");
             }
 
             newSha = GitUtil.getCurrentHeadSha1(repoDir, 40);
         } catch (WrongRepositoryStateException | RefNotFoundException | CheckoutConflictException e) {
-            rollbackOrThrow(repoDir, previousSha, "Repository state prevents sync on " + label + ": " + e.getMessage(), source, label);
-            return;
+            rollbackOrThrow(repoDir, previousSha, "Repository state prevents sync on " + label + ": " + e.getMessage());
+            return 0;
         } catch (IOException | GitAPIException e) {
-            rollbackOrThrow(repoDir, previousSha, "Sync failed on " + label + ": " + e.getMessage(), source, label);
-            return;
+            rollbackOrThrow(repoDir, previousSha, "Sync failed on " + label + ": " + e.getMessage());
+            return 0;
         }
 
         if (newSha.equals(previousSha)) {
@@ -109,27 +111,60 @@ public class GitSyncCommand {
                     .append(Component.literal(label + " is already up to date").withStyle(ChatFormatting.GREEN)),
                 true
             );
-            return;
+            return 1;
         }
 
-        String oldShort = shortSha(previousSha);
-        String newShort = shortSha(newSha);
+        source.sendSuccess(
+            () -> Component.empty()
+                .append(Component.literal("Git update applied to ").withStyle(ChatFormatting.RESET))
+                .append(Component.literal(label).withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal(", validating datapacks...").withStyle(ChatFormatting.RESET)),
+            true
+        );
+
+        if (!reloadDatapacks(server)) {
+            source.sendSuccess(
+                () -> Component.empty()
+                    .append(Component.literal("Validation failed on new revision, rolling back ").withStyle(ChatFormatting.RED))
+                    .append(Component.literal(label).withStyle(ChatFormatting.YELLOW))
+                    .append(Component.literal("...").withStyle(ChatFormatting.RED)),
+                true
+            );
+
+            rollbackOrThrow(repoDir, previousSha, "Failed to restore " + label + " to previous revision");
+
+            if (!reloadDatapacks(server)) {
+                throw new CommandSyntaxException(null, () -> "Rollback restored Git commit, but datapack reload still failed. Manual intervention required.");
+            }
+
+            source.sendSuccess(
+                () -> Component.empty()
+                    .append(Component.literal("Sync rejected; restored ").withStyle(ChatFormatting.RED))
+                    .append(Component.literal(label).withStyle(ChatFormatting.YELLOW))
+                    .append(Component.literal(" to ").withStyle(ChatFormatting.RED))
+                    .append(Component.literal(shortSha(previousSha)).withStyle(ChatFormatting.AQUA)),
+                true
+            );
+            return 0;
+        }
+
         source.sendSuccess(
             () -> Component.empty()
                 .append(Component.literal("Synchronized ").withStyle(ChatFormatting.RESET))
                 .append(Component.literal(label).withStyle(ChatFormatting.YELLOW))
                 .append(Component.literal(" (").withStyle(ChatFormatting.RESET))
-                .append(Component.literal(oldShort).withStyle(ChatFormatting.AQUA))
+                .append(Component.literal(shortSha(previousSha)).withStyle(ChatFormatting.AQUA))
                 .append(Component.literal(" -> ").withStyle(ChatFormatting.RESET))
-                .append(Component.literal(newShort).withStyle(ChatFormatting.LIGHT_PURPLE))
+                .append(Component.literal(shortSha(newSha)).withStyle(ChatFormatting.LIGHT_PURPLE))
                 .append(Component.literal(")").withStyle(ChatFormatting.RESET)),
             true
         );
+        return 1;
     }
 
-    private static void rollbackOrThrow(File repoDir, String previousSha, String reason, CommandSourceStack source, String label) throws CommandSyntaxException {
+    private static void rollbackOrThrow(File repoDir, String previousSha, String reason) throws CommandSyntaxException {
         if (previousSha == null || previousSha.isEmpty()) {
-            throw new CommandSyntaxException(null, () -> reason + " (rollback unavailable: no previous commit)");
+            throw new CommandSyntaxException(null, () -> reason + " (rollback unavailable: missing previous commit)");
         }
 
         try (Git git = Git.open(repoDir)) {
@@ -137,20 +172,22 @@ public class GitSyncCommand {
                 .setMode(ResetCommand.ResetType.HARD)
                 .setRef(previousSha)
                 .call();
-
-            source.sendSuccess(
-                () -> Component.empty()
-                    .append(Component.literal("Sync failed; rolled back ").withStyle(ChatFormatting.RED))
-                    .append(Component.literal(label).withStyle(ChatFormatting.YELLOW))
-                    .append(Component.literal(" to ").withStyle(ChatFormatting.RED))
-                    .append(Component.literal(shortSha(previousSha)).withStyle(ChatFormatting.AQUA)),
-                true
-            );
         } catch (IOException | GitAPIException rollbackError) {
             throw new CommandSyntaxException(null, () -> reason + " (rollback failed: " + rollbackError.getMessage() + ")");
         }
+    }
 
-        throw new CommandSyntaxException(null, () -> reason);
+    private static boolean reloadDatapacks(MinecraftServer server) {
+        try {
+            CompletableFuture<Void> future = server.reloadResources(server.getPackRepository().getSelectedIds());
+            future.get();
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException e) {
+            return false;
+        }
     }
 
     private static String shortSha(String sha) {

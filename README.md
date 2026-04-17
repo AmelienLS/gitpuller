@@ -64,7 +64,7 @@ git info
 # Fetches changes for the selected pack. If the HEAD was the last available commit of the branch but new ones got added, it will checkout to the latest available commit. 
 git pull <pack name>
 
-# Transactional sync: pulls and rolls back automatically if operation fails.
+# Transactional sync: pulls, validates datapack reload, and rolls back automatically if validation fails.
 git sync <pack name>
 
 # Use a temporary token (not recommended)
@@ -84,7 +84,7 @@ git info
 # Fetches changes. If the HEAD was the last available commit of the branch but new ones got added, it will checkout to the latest available commit. 
 git pull
 
-# Transactional sync: pulls and rolls back automatically if operation fails.
+# Transactional sync: pulls, validates datapack reload, and rolls back automatically if validation fails.
 git sync
 
 # Use a temporary token (not recommended)
