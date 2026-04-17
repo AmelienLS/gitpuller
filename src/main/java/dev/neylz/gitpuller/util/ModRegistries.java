@@ -17,6 +17,7 @@ public class ModRegistries {
         CommandRegistrationCallback.EVENT.register(GitCloneCommand::register);
         CommandRegistrationCallback.EVENT.register(GitInfoCommand::register);
         CommandRegistrationCallback.EVENT.register(GitPullCommand::register);
+        CommandRegistrationCallback.EVENT.register(GitSyncCommand::register);
         CommandRegistrationCallback.EVENT.register(GitTokenCommand::register);
 
     }
